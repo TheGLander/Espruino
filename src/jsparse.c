@@ -1376,6 +1376,188 @@ NO_INLINE JsVar *jspeFactorArray() {
   return contents;
 }
 
+#ifndef ESP_NO_JS
+JsVar *jspeFilterJsxChildren(JsVar *children) {
+  JsVar *newChildren = jsvNewEmptyArray();
+  JsvObjectIterator it;
+  jsvObjectIteratorNew(&it, children);
+  while (jsvObjectIteratorHasValue(&it)) {
+    JsVar *child = jsvObjectIteratorGetValue(&it);
+    if (!jsvGetBool(child)) {
+      // Falsy values are ignored
+    } else if (jsvIsArray(child)) {
+      JsVar *cleanChild = jspeFilterJsxChildren(child);
+      jsvLockAgain(child);
+      jsvArrayPushAll(newChildren, cleanChild, false);
+      jsvUnLock(cleanChild);
+    } else {
+      jsvArrayPush(newChildren, child);
+    }
+    jsvUnLock(child);
+    jsvObjectIteratorNext(&it);
+  }
+  jsvObjectIteratorFree(&it);
+  jsvUnLock(children);
+  return newChildren;
+}
+
+JsVar *jspeMergeStringsInArr(JsVar *arr) {
+  JsVar *str = 0;
+  JsVar *newArr = jsvNewEmptyArray();
+  JsvObjectIterator it;
+  jsvObjectIteratorNew(&it, arr);
+  while (jsvObjectIteratorHasValue(&it)) {
+    JsVar *v = jsvObjectIteratorGetValue(&it);
+    if (jsvIsString(v)) {
+      if (!str) str = jsvCopy(v, true);
+      else jsvAppendStringVarComplete(str, v);
+    } else {
+      if (str) {
+        jsvArrayPush(newArr, str);
+        jsvUnLock(str);
+        str = 0;
+      }
+      jsvArrayPush(newArr, v);
+    }
+    jsvUnLock(v);
+    jsvObjectIteratorNext(&it);
+  }
+  if (str) {
+    jsvArrayPush(newArr, str);
+    jsvUnLock(str);
+  }
+  jsvObjectIteratorFree(&it);
+  jsvUnLock(arr);
+  return newArr;
+}
+
+JsVar *__jspeFactorJsx(JsVar *var) {
+  JsVar *props = 0;
+  if (var) {
+    props = jsvNewObject();
+    if (!props) { // out of memory
+        jspSetError(false);
+        return 0;
+    }
+  }
+  bool skipChildren = 0;
+  while (!JSP_SHOULDNT_PARSE && lex->tk != '>') {
+    if (lex->tk == '/') {
+      jslGetNextToken();
+      skipChildren = 1;
+      break;
+    }
+    // Function argument spread isn't supported, so this doesn't, either
+    JsVar *propName = jslGetTokenValueAsVar();
+    JSP_MATCH(LEX_ID);
+
+    // This is usually in the form of a={b}, but a on it's own is equivalent to a={true}
+    JsVar *propsPropName = jsvFindChildFromVar(props, propName, true);
+    JsVar* propValue;
+    if (lex->tk != '=') {
+      propValue = jsvNewFromBool(true);
+    } else {
+      JSP_MATCH('=');
+      if (lex->tk == '{') {
+        JSP_ASSERT_MATCH('{');
+        propValue = jspeExpression();
+        JSP_MATCH('}');
+      } else {
+        propValue = jslGetTokenValueAsVar();
+        JSP_MATCH(LEX_STR);
+      }
+    }
+    jsvSetValueOfName(propsPropName, propValue);
+  }
+  JSP_MATCH('>');
+  if (!skipChildren) {
+    JsVar *children = jsvNewEmptyArray();
+    if (!children) { // out of memory
+        jspSetError(false);
+        return 0;
+    }
+
+    JsVar *child;
+    JsVar *currString = 0;
+    while (!JSP_SHOULDNT_PARSE) {
+      if (jslIsIDOrReservedWord()) {
+        child = jslGetTokenValueAsVar();
+        int nextOffset = lex->tokenStart + lex->tokenl;
+        jslGetNextToken();
+        if (lex->tokenStart != nextOffset) {
+          // Looks like there's whitespace
+          // HTML suggests this may be no more than 1 space
+          jsvAppendCharacter(child, ' ');
+        }
+      } else if (lex->tk == '{') {
+        JSP_ASSERT_MATCH('{');
+        child = jspeExpression();
+        jsvLockAgain(child);
+        JSP_MATCH('}');
+      } else {
+        JSP_MATCH('<');
+        bool closing = false;
+        if (lex->tk == '/') {
+          closing = true;
+          JSP_ASSERT_MATCH('/');
+        }
+        JsVar *newVar = 0;
+        if (lex->tk != '>') {
+          newVar = jspGetNamedVariable(jslGetTokenValueAsString());
+          JSP_MATCH(LEX_ID);
+          JsVar *parent = 0;
+          newVar = jspeFactorMember(newVar, &parent);
+          newVar = jsvSkipNameWithParent(newVar, true, parent);
+        }
+        if (closing) {
+          jsvUnLock(newVar);
+          if (var == newVar) {
+            JSP_MATCH('>');
+            break;
+          } else {
+            // We have an abandoned closing tag
+            jsExceptionHere(JSET_SYNTAXERROR, "Unexpected closing tag </%v>", newVar);
+            if (currString) jsvUnLock(currString);
+            return 0;
+          }
+        }
+        child = __jspeFactorJsx(newVar);
+      }
+      jsvArrayPush(children, child);
+      jsvUnLock(child);
+    }
+    children = jspeMergeStringsInArr(jspeFilterJsxChildren(children));
+    if (!var) {
+      return children;
+    }
+    if (jsvGetArrayLength(children) > 0) {
+      JsVar *childrenName = jsvNewFromString("children");
+      JsVar *childrenKey = jsvFindChildFromVar(props, childrenName, true);
+      jsvSetValueOfName(childrenKey, children);
+      jsvUnLock2(childrenKey, childrenName);
+    }
+    jsvUnLock(children);
+  }
+  JsVar *ret = jspeFunctionCall(var, 0, 0, false, 1, &props);
+  jsvUnLock2(props, var);
+  return ret;
+}
+
+NO_INLINE JsVar *jspeFactorJsx() {
+  JSP_MATCH('<');
+  JsVar *var = 0;
+  if (lex->tk != '>') {
+    var = jspGetNamedVariable(jslGetTokenValueAsString());
+    JSP_MATCH(LEX_ID);
+    JsVar *parent = 0;
+    var = jspeFactorMember(var, &parent);
+    var = jsvSkipNameWithParent(var, true, parent);
+  }
+  return __jspeFactorJsx(var);
+}
+
+#endif
+
 NO_INLINE void jspEnsureIsPrototype(JsVar *instanceOf, JsVar *prototypeName) {
   if (!prototypeName) return;
   JsVar *prototypeVar = jsvSkipName(prototypeName);
@@ -1754,7 +1936,14 @@ NO_INLINE JsVar *jspeFactor() {
   } else if (lex->tk=='[') {
     if (!jspCheckStackPosition()) return 0;
     return jspeFactorArray();
-  } else if (lex->tk==LEX_R_FUNCTION) {
+  }
+#ifndef ESPR_NO_JSX
+  else if (lex->tk=='<') {
+    if (!jspCheckStackPosition()) return 0;
+    return jspeFactorJsx();
+  }
+#endif
+  else if (lex->tk==LEX_R_FUNCTION) {
     if (!jspCheckStackPosition()) return 0;
     JSP_ASSERT_MATCH(LEX_R_FUNCTION);
     return jspeFunctionDefinition(true);
@@ -2911,7 +3100,10 @@ NO_INLINE JsVar *jspeStatement() {
       lex->tk=='+' ||
       lex->tk=='~' ||
       lex->tk=='[' ||
-      lex->tk=='(') {
+      lex->tk=='('
+#ifndef ESPR_NO_JSX
+      || lex->tk=='<'
+#endif) {
     /* Execute a simple statement that only contains basic arithmetic... */
     return jspeExpression();
   } else if (lex->tk=='{') {

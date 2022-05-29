@@ -644,7 +644,9 @@ void jslGetNextToken() {
           lastToken=='+' ||
           lastToken=='-' ||
           lastToken=='/' ||
+#ifdef ESPR_NO_JSX
           lastToken=='<' ||
+#endif
           lastToken=='=' ||
           lastToken=='>' ||
           lastToken=='?' ||
