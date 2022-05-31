@@ -3103,7 +3103,8 @@ NO_INLINE JsVar *jspeStatement() {
       lex->tk=='('
 #ifndef ESPR_NO_JSX
       || lex->tk=='<'
-#endif) {
+#endif
+      ) {
     /* Execute a simple statement that only contains basic arithmetic... */
     return jspeExpression();
   } else if (lex->tk=='{') {
