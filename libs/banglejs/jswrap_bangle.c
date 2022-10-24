@@ -648,10 +648,11 @@ JshI2CInfo i2cInternal;
 #endif
 
 #ifdef TOUCH_DEVICE
-unsigned char touchX, touchY; ///< current touch event coordinates
-unsigned char lastTouchX, lastTouchY; ///< last touch event coordinates - updated when JSBT_DRAG is fired
+short touchX, touchY; ///< current touch event coordinates
+short lastTouchX, lastTouchY; ///< last touch event coordinates - updated when JSBT_DRAG is fired
 bool touchPts, lastTouchPts; ///< whether a fnger is currently touching or not
 unsigned char touchType; ///< variable to differentiate press, long press, double press
+short touchMinX = 0, touchMinY = 0, touchMaxX = 160, touchMaxY = 160; ///< touchscreen calibration values (what we expect from hardware, then we map this to LCD_WIDTH/HEIGHT)
 #endif
 
 #ifdef PRESSURE_DEVICE
@@ -1656,6 +1657,27 @@ void btn4Handler(bool state, IOEventFlags flags) {
 #endif
 
 #ifdef TOUCH_DEVICE // so it's available even in emulator
+
+// Convert Touchscreen gesture based on graphics orientation
+TouchGestureType touchSwipeRotate(TouchGestureType g) {
+  // gesture is the value that comes straight from the touchscreen
+  if (graphicsInternal.data.flags & JSGRAPHICSFLAGS_INVERT_X) {
+    if (g==TG_SWIPE_LEFT) g=TG_SWIPE_RIGHT;
+    else if (g==TG_SWIPE_RIGHT) g=TG_SWIPE_LEFT;
+  }
+  if (graphicsInternal.data.flags & JSGRAPHICSFLAGS_INVERT_Y) {
+    if (g==TG_SWIPE_UP) g=TG_SWIPE_DOWN;
+    else if (g==TG_SWIPE_DOWN) g=TG_SWIPE_UP;
+  }
+  if (graphicsInternal.data.flags & JSGRAPHICSFLAGS_SWAP_XY) {
+    if (g==TG_SWIPE_LEFT) g=TG_SWIPE_UP;
+    else if (g==TG_SWIPE_RIGHT) g=TG_SWIPE_DOWN;
+    else if (g==TG_SWIPE_UP) g=TG_SWIPE_LEFT;
+    else if (g==TG_SWIPE_DOWN) g=TG_SWIPE_RIGHT;
+  }
+  return g;
+}
+
 void touchHandlerInternal(int tx, int ty, int pts, int gesture) {
   // ignore if locked
   if (bangleFlags & JSBF_LOCKED) return;
@@ -1673,19 +1695,19 @@ void touchHandlerInternal(int tx, int ty, int pts, int gesture) {
     switch (gesture) { // gesture
     case 0:break; // no gesture
     case 1: // slide down
-      touchGesture = TG_SWIPE_DOWN;
+      touchGesture = touchSwipeRotate(TG_SWIPE_DOWN);
       bangleTasks |= JSBT_SWIPE;
       break;
     case 2: // slide up
-      touchGesture = TG_SWIPE_UP;
+      touchGesture = touchSwipeRotate(TG_SWIPE_UP);
       bangleTasks |= JSBT_SWIPE;
       break;
     case 3: // slide left
-      touchGesture = TG_SWIPE_LEFT;
+      touchGesture = touchSwipeRotate(TG_SWIPE_LEFT);
       bangleTasks |= JSBT_SWIPE;
       break;
     case 4: // slide right
-      touchGesture = TG_SWIPE_RIGHT;
+      touchGesture = touchSwipeRotate(TG_SWIPE_RIGHT);
       bangleTasks |= JSBT_SWIPE;
       break;
     case 5: // single click
@@ -1737,8 +1759,8 @@ void touchHandler(bool state, IOEventFlags flags) {
   // 4: Y hi
   // 5: Y lo (0..160)
   touchHandlerInternal(
-    buf[3] * LCD_WIDTH / 160, // touchX
-    buf[5] * LCD_HEIGHT / 160, // touchY
+    (buf[3]-touchMinX) * LCD_WIDTH / (touchMaxX-touchMinX), // touchX
+    (buf[5]-touchMinY) * LCD_HEIGHT / (touchMaxY-touchMinY), // touchY
     buf[1], // touchPts
     buf[0]); // gesture
 }
@@ -2323,6 +2345,12 @@ JsVar * _jswrap_banglejs_setOptions(JsVar *options, bool createObject) {
 #ifdef HEARTRATE
   int _hrmPollInterval = hrmPollInterval;
 #endif
+#ifdef TOUCH_DEVICE
+  int touchX1 = touchMinX;
+  int touchY1 = touchMinY;
+  int touchX2 = touchMaxX;
+  int touchY2 = touchMaxY;
+#endif
   jsvConfigObject configs[] = {
 #ifdef HEARTRATE
       {"hrmPollInterval", JSV_INTEGER, &_hrmPollInterval},
@@ -2350,6 +2378,12 @@ JsVar * _jswrap_banglejs_setOptions(JsVar *options, bool createObject) {
       {"lcdPowerTimeout", JSV_INTEGER, &lcdPowerTimeout},
       {"backlightTimeout", JSV_INTEGER, &backlightTimeout},
       {"btnLoadTimeout", JSV_INTEGER, &btnLoadTimeout},
+#ifdef TOUCH_DEVICE
+      {"touchX1", JSV_INTEGER, &touchX1},
+      {"touchY1", JSV_INTEGER, &touchY1},
+      {"touchX2", JSV_INTEGER, &touchX2},
+      {"touchY2", JSV_INTEGER, &touchY2},
+#endif
   };
   if (createObject) {
     return jsvCreateConfigObject(configs, sizeof(configs) / sizeof(jsvConfigObject));
@@ -2369,6 +2403,12 @@ JsVar * _jswrap_banglejs_setOptions(JsVar *options, bool createObject) {
     accelGestureEndThresh = int_sqrt32(_accelGestureEndThresh);
 #ifdef HEARTRATE
     hrmPollInterval = (uint16_t)_hrmPollInterval;
+#endif
+#ifdef TOUCH_DEVICE
+    touchMinX = touchX1;
+    touchMinY = touchY1;
+    touchMaxX = touchX2;
+    touchMaxY = touchY2;
 #endif
   }
   return 0;
@@ -3352,7 +3392,19 @@ NO_INLINE void jswrap_banglejs_init() {
     graphicsTheme.bgH = jsvGetIntegerAndUnLock(jsvObjectGetChild(v,"bgH",0));
     graphicsTheme.dark = jsvGetBoolAndUnLock(jsvObjectGetChild(v,"dark",0));
   }
-  jsvUnLock2(v,settings);
+  jsvUnLock(v);
+#ifdef TOUCH_DEVICE
+  // load touchscreen calibration
+  v = jsvIsObject(settings) ? jsvObjectGetChild(settings,"touch",0) : 0;
+    if (jsvIsObject(v)) {
+      touchMinX = jsvGetIntegerAndUnLock(jsvObjectGetChild(v,"x1",0));
+      touchMinY = jsvGetIntegerAndUnLock(jsvObjectGetChild(v,"y1",0));
+      touchMaxX = jsvGetIntegerAndUnLock(jsvObjectGetChild(v,"x2",0));
+      touchMaxY = jsvGetIntegerAndUnLock(jsvObjectGetChild(v,"y2",0));
+    }
+    jsvUnLock(v);
+#endif
+    jsvUnLock(settings);
 
 #ifdef LCD_WIDTH
   // Just reset any graphics settings that may need updating
