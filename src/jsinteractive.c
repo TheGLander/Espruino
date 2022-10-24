@@ -816,7 +816,9 @@ void jsiSemiInit(bool autoLoad, JsfFileName *loadedFilename) {
     jsiStatus &= ~JSIS_COMPLETELY_RESET; // loading code, remove this flag
     jspSoftKill();
     jsvSoftKill();
-    jsfLoadStateFromFlash();
+#ifndef ESPR_NO_VARIMAGE
+    jsfLoadStateFromFlash(SAVED_CODE_VARIMAGE, false);
+#endif
     jsvSoftInit();
     jspSoftInit();
   }
@@ -2243,7 +2245,9 @@ void jsiIdle() {
       jsiSoftKill();
       jspSoftKill();
       jsvSoftKill();
-      jsfSaveToFlash();
+#ifndef ESPR_NO_VARIMAGE
+      jsfSaveToFlash(SAVED_CODE_VARIMAGE, true);
+#endif
       jshReset();
       jsvSoftInit();
       jspSoftInit();
@@ -2252,28 +2256,60 @@ void jsiIdle() {
     }
     if ((s&JSIS_TODO_FLASH_LOAD) == JSIS_TODO_FLASH_LOAD) {
       JsVar *filenameVar = jsvObjectGetChild(execInfo.hiddenRoot,JSI_LOAD_CODE_NAME,0);
-      // TODO: why can't we follow the same steps here for both?
+      JsfFileName filename;
       if (filenameVar) {
-        JsfFileName filename = jsfNameFromVarAndUnLock(filenameVar);
-        // no need to jsvObjectRemoveChild as we're shutting down anyway!
-        // go through steps as if we're resetting
-        jsiKill();
-        jsvKill();
-        jshReset();
-        jsvInit(0);
-        jsiSemiInit(false, &filename); // don't autoload code
-        // load the code we specified
-        JsVar *code = jsfReadFile(filename,0,0);
-        if (code)
+        filename = jsfNameFromVarAndUnLock(filenameVar);
+      }
+#ifndef ESP_NOSUSPEND_APPS
+      unsigned char susFilename[64];
+      unsigned char unsusFilename[64];
+      JsVar *susFilenameVar = jsvObjectGetChild(execInfo.root, "__FILE__", 0);
+      JsVar *vimgSuffix = jsvNewFromString(".vimg");
+      if (susFilenameVar) {
+        jsvAppendStringVarComplete(susFilenameVar, vimgSuffix);
+        jsvGetString(susFilenameVar, susFilename, sizeof(susFilename));
+        jsvUnLock(susFilenameVar);
+      }
+      #endif
+      jsiSoftKill();
+      jspSoftKill();
+      jsvSoftKill();
+#ifndef ESP_NO_SUSPEND_APPS
+      if (filenameVar) {
+        JsVar *unsusFilenameVar = jsvCopy(jsvLockAgain(filenameVar), false);
+        if (unsusFilenameVar) {
+          jsvUnLock(filenameVar);
+          jsvAppendStringVarComplete(unsusFilenameVar, vimgSuffix);
+          jsvGetString(unsusFilenameVar, unsusFilename, sizeof(unsusFilename));
+          jsvUnLock(unsusFilenameVar); 
+        }
+      }
+      jsvUnLock(vimgSuffix);
+      if (susFilename) {
+        jsfSaveToFlash(susFilename, false);
+      }
+#endif
+      jsvKill();
+      jshReset();
+      jsvInit(0);
+      if (filenameVar) {
+        bool unsuspended = jsfLoadStateFromFlash(unsusFilename, true);
+        if (unsuspended) {
+          jsfLoadStateFromFlash(unsusFilename, false);
+          jsvSoftInit();
+          jspSoftInit();
+          jsiSoftInit(false /* not been reset */);
+        } else {
+          jsiSemiInit(false, &filename);
+          // load the code we specified
+          JsVar *code = jsfReadFile(filename,0,0);
+          if (code)
           jsvUnLock2(jspEvaluateVar(code,0,0), code);
+        }
       } else {
-        jsiSoftKill();
-        jspSoftKill();
-        jsvSoftKill();
-        jsvKill();
-        jshReset();
-        jsvInit(0);
-        jsfLoadStateFromFlash();
+#ifndef ESPR_NO_VARIMAGE
+        jsfLoadStateFromFlash(SAVED_CODE_VARIMAGE, false);
+#endif
         jsvSoftInit();
         jspSoftInit();
         jsiSoftInit(false /* not been reset */);

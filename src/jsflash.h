@@ -126,10 +126,13 @@ typedef struct {
 JsfStorageStats jsfGetStorageStats(uint32_t addr, bool allPages);
 
 // ------------------------------------------------------------------------ For loading/saving code to flash
+#ifndef ESPR_NO_VARIMAGE
+#define SAVED_CODE_VARIMAGE ".varimg" // Image of all JsVars written to flash
+#endif
 /// Save contents of JsVars into Flash.
-void jsfSaveToFlash();
+void jsfSaveToFlash(char* filename, bool persist);
 /// Load the RAM image from flash (this is the actual interpreter state)
-void jsfLoadStateFromFlash();
+bool jsfLoadStateFromFlash(char* filename, bool dryRun);
 
 /// Save bootup code to flash - see jsfLoadBootCodeFromFlash
 void jsfSaveBootCodeToFlash(JsVar *code, bool runAfterReset);

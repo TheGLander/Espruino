@@ -20,9 +20,6 @@
 
 #define SAVED_CODE_BOOTCODE_RESET ".bootrst" // bootcode that runs even after reset
 #define SAVED_CODE_BOOTCODE ".bootcde" // bootcode that doesn't run after reset
-#ifndef ESPR_NO_VARIMAGE
-#define SAVED_CODE_VARIMAGE ".varimg" // Image of all JsVars written to flash
-#endif
 
 #define JSF_START_ADDRESS FLASH_SAVED_CODE_START
 #define JSF_END_ADDRESS (FLASH_SAVED_CODE_START+FLASH_SAVED_CODE_LENGTH)
@@ -1198,15 +1195,12 @@ int jsfLoadFromFlash_readcb(uint32_t *cbdata) {
 }
 
 /// Save the RAM image to flash (this is the actual interpreter state)
-void jsfSaveToFlash() {
-#ifdef ESPR_NO_VARIMAGE
-  jsiConsolePrint("Not implemented in this build\n");
-#else
+void jsfSaveToFlash(char* filename, bool persist) {
   unsigned int varSize = jsvGetMemoryTotal() * (unsigned int)sizeof(JsVar);
   unsigned char* varPtr = (unsigned char *)_jsvGetAddressOf(1);
 
   jsiConsolePrint("Compacting Flash...\n");
-  JsfFileName name = jsfNameFromString(SAVED_CODE_VARIMAGE);
+  JsfFileName name = jsfNameFromString(filename);
   // Ensure we get rid of any saved code we had before
   jsfEraseFile(name);
   // Try and compact, just to ensure we get the maximum amount saved
@@ -1218,14 +1212,16 @@ void jsfSaveToFlash() {
   uint32_t savedCodeAddr = jsfCreateFile(name, compressedSize, JSFF_COMPRESSED, NULL);
   if (!savedCodeAddr) {
     jsiConsolePrintf("ERROR: Too big to save to flash (%d vs %d bytes)\n", compressedSize, jsfGetStorageStats(0,true).free);
-    jsvSoftInit();
-    jspSoftInit();
-    jsiConsolePrint("Deleting command history and trying again...\n");
-    while (jsiFreeMoreMemory());
-    jspSoftKill();
-    jsvSoftKill();
-    compressedSize = 4 + COMPRESS(varPtr, varSize, NULL, NULL);
-    savedCodeAddr = jsfCreateFile(name, compressedSize, JSFF_COMPRESSED, NULL);
+    if (persist) {
+      jsvSoftInit();
+      jspSoftInit();
+      jsiConsolePrint("Deleting command history and trying again...\n");
+      while (jsiFreeMoreMemory());
+      jspSoftKill();
+      jsvSoftKill();
+      compressedSize = 4 + COMPRESS(varPtr, varSize, NULL, NULL);
+      savedCodeAddr = jsfCreateFile(name, compressedSize, JSFF_COMPRESSED, NULL);
+    }
   }
   if (!savedCodeAddr) {
     if (jsfGetStorageStats(JSF_DEFAULT_START_ADDRESS, true).fileBytes)
@@ -1250,17 +1246,15 @@ void jsfSaveToFlash() {
   COMPRESS(varPtr, varSize, jsfSaveToFlash_writecb, (uint32_t*)&cbData);
   jsfSaveToFlash_finish(&cbData);
   jsiConsolePrintf("\nCompressed %d bytes to %d\n", varSize, compressedSize);
-#endif
 }
 
 
 /// Load the RAM image from flash (this is the actual interpreter state)
-void jsfLoadStateFromFlash() {
-#ifndef ESPR_NO_VARIMAGE
+bool jsfLoadStateFromFlash(char* filename, bool dryRun) {
   JsfFileHeader header;
-  uint32_t savedCode = jsfFindFile(jsfNameFromString(SAVED_CODE_VARIMAGE),&header);
+  uint32_t savedCode = jsfFindFile(jsfNameFromString(filename),&header);
   if (!savedCode) {
-    return;
+    return false;
   }
 
   //  unsigned int dataSize = jsvGetMemoryTotal() * sizeof(JsVar);
@@ -1276,12 +1270,13 @@ void jsfLoadStateFromFlash() {
   for (i=0;i<4;i++)
     ((char*)&hash)[i] = (char)jsfLoadFromFlash_readcb((uint32_t*)&cbData);
   if (hash != getBuildHash()) {
-    jsiConsolePrintf("Not loading saved code from different Espruino firmware.\n");
-    return;
+    if (!dryRun) jsiConsolePrintf("Not loading saved code from different Espruino firmware.\n");
+    return false;
   }
+  if (dryRun) return true;
   jsiConsolePrintf("Loading %d bytes from flash...\n", jsfGetFileSize(&header));
   DECOMPRESS(jsfLoadFromFlash_readcb, (uint32_t*)&cbData, varPtr);
-#endif
+  return true;
 }
 
 void jsfSaveBootCodeToFlash(JsVar *code, bool runAfterReset) {
